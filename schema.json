@@ -1,0 +1,73 @@
+{
+  "notify_enabled": {
+    "name": "启用通知",
+    "type": "switch",
+    "default": false,
+    "hint": "配置通知渠道后启用；重新加载插件生效"
+  },
+  "notify_method": {
+    "name": "通知渠道",
+    "type": "string",
+    "default": "ntfy",
+    "hint": "",
+    "options": [
+      "ntfy",
+      "email",
+      "session"
+    ]
+  },
+  "ntfy": {
+    "name": "ntfy",
+    "type": "section",
+    "fields": {
+      "topic_url": {
+        "name": "Topic URL",
+        "type": "string",
+        "default": "",
+        "hint": ""
+      },
+      "authorization": {
+        "name": "Bearer token",
+        "type": "sensitive",
+        "default": "",
+        "hint": "可填纯 token 或 Bearer token；建议使用 HTTPS"
+      }
+    }
+  },
+  "email": {
+    "name": "邮件",
+    "type": "section",
+    "fields": {
+      "address": {
+        "name": "收件邮箱",
+        "type": "string",
+        "default": "",
+        "hint": "需要启用并配置 kira-ai-plugin-email 的 SMTP"
+      }
+    }
+  },
+  "session": {
+    "name": "跨会话",
+    "type": "section",
+    "fields": {
+      "target_session_id": {
+        "name": "目标会话",
+        "type": "string",
+        "default": "",
+        "hint": "adapter_name:dm:user_id 或 adapter_name:gm:group_id；必须使用另一个在线适配器"
+      }
+    }
+  },
+  "disconnect_grace_seconds": {
+    "name": "断线宽限秒数",
+    "type": "integer",
+    "default": 30,
+    "hint": "普通断线持续超过此时长才通知；主动停止不通知"
+  },
+  "notify_template": {
+    "name": "通知模板",
+    "type": "textarea",
+    "default": "QQ 离线告警（不一定是腾讯踢下线）\n时间：{time}\n适配器：{adapter}\nQQ：{qq}\n信号：{signal}\n事件原文：{event}",
+    "hint": "占位符 {time} {adapter} {qq} {signal} {event}；字面花括号用 {{ }}"
+  }
+}
