@@ -1,0 +1,12 @@
+{
+  "display_name": "QQ 下线通知",
+  "plugin_id": "kira-ai-plugin-qq-kicked-notifier",
+  "version": "1.0.0",
+  "author": "hiroa-ai",
+  "description": "监测 NapCat QQ 离线/连接断开，通过外部渠道通知管理员",
+  "tags": [
+    "qq",
+    "notification"
+  ],
+  "repo": "https://github.com/hiroa-ai/kira-ai-plugin-qq-kicked-notifier"
+}
