@@ -9,11 +9,12 @@
     "name": "通知渠道",
     "type": "string",
     "default": "ntfy",
-    "hint": "",
+    "hint": "ntfy/email/session 直发固定内容；llm 发布通知由目标会话的 LLM 自行表述",
     "options": [
       "ntfy",
       "email",
-      "session"
+      "session",
+      "llm"
     ]
   },
   "ntfy": {
@@ -52,11 +53,23 @@
     "fields": {
       "target_session_id": {
         "name": "目标会话",
-        "type": "string",
+        "type": "session_select",
         "default": "",
-        "hint": "adapter_name:dm:user_id 或 adapter_name:gm:group_id；必须使用另一个在线适配器"
+        "hint": "从会话列表选择；session/llm 渠道共用，必须使用另一个在线适配器"
       }
     }
+  },
+  "record_enabled": {
+    "name": "记录到会话历史",
+    "type": "switch",
+    "default": false,
+    "hint": "掉线时向该适配器的 dm/gm 会话写入记录，下次对话 bot 可自知；可与通知渠道叠加，也可单独使用"
+  },
+  "record_template": {
+    "name": "记录模板",
+    "type": "textarea",
+    "default": "[系统通知] {adapter} 适配器账号 {qq} 于 {time} 掉线（{tag}：{message}）",
+    "hint": "写入会话历史的记录格式；占位符与通知模板相同，字面花括号用 {{ }}"
   },
   "disconnect_grace_seconds": {
     "name": "断线宽限秒数",

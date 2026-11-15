@@ -47,8 +47,11 @@ class NotifierTests(unittest.IsolatedAsyncioTestCase):
             config={"bot_pid": "123"}, get_client=lambda: self.client,
             permanently_disconnected=False, _stopping=False,
         )
-        self.ctx = types.SimpleNamespace(send_message_chain=AsyncMock(return_value=types.SimpleNamespace(ok=True)))
-        self.plugin = module.QQKickedNotifier(self.ctx, {})
+        self.ctx = types.SimpleNamespace(
+            send_message_chain=AsyncMock(return_value=types.SimpleNamespace(ok=True)),
+            publish_notice=AsyncMock(),
+        )
+        self.plugin = module.QQKickedNotifier(self.ctx, {"notify_enabled": True})
         self.plugin._send = AsyncMock()
         self.state = self.plugin._attach(self.adapter)
 
@@ -104,9 +107,9 @@ class NotifierTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._send.assert_awaited_once()
 
     async def test_enabled_switch(self):
-        await self.plugin.initialize()
-        self.assertIsNone(self.plugin._task)
-        self.plugin.plugin_cfg["notify_enabled"] = True
+        disabled = module.QQKickedNotifier(self.ctx, {"notify_enabled": False, "record_enabled": False})
+        await disabled.initialize()
+        self.assertIsNone(disabled._task)
         self.plugin._monitor = AsyncMock()
         await self.plugin.initialize()
         await asyncio.sleep(0)
@@ -180,6 +183,89 @@ class NotifierTests(unittest.IsolatedAsyncioTestCase):
         plugin = module.QQKickedNotifier(self.ctx, {"notify_method": "email", "email": {"address": "admin@example.test"}})
         await plugin._send("qq", "alert")
         email.send_email.assert_awaited_once_with(None, to="admin@example.test", subject="KiraAI QQ 离线告警", body="alert")
+
+    async def test_llm_publish_notice(self):
+        plugin = module.QQKickedNotifier(self.ctx, {"notify_method": "llm", "session": {"target_session_id": "qq:dm:123"}})
+        with self.assertRaises(ValueError):
+            await plugin._send("qq", "alert")
+        plugin.plugin_cfg["session"]["target_session_id"] = "telegram:dm:456"
+        await plugin._send("qq", "alert")
+        self.ctx.publish_notice.assert_awaited_once()
+        target, chain = self.ctx.publish_notice.call_args.args
+        self.assertEqual(target, "telegram:dm:456")
+        self.assertEqual(chain.content, "alert")
+
+    def make_session_mgr(self, sessions):
+        return types.SimpleNamespace(
+            get_sessions=AsyncMock(return_value=sessions),
+            update_memory=AsyncMock(return_value=True),
+        )
+
+    async def test_record_writes_adapter_sessions(self):
+        sessions = [
+            types.SimpleNamespace(sid="qq:dm:1", adapter_name="qq", session_type="dm"),
+            types.SimpleNamespace(sid="qq:gm:2", adapter_name="qq", session_type="gm"),
+            types.SimpleNamespace(sid="qq:gm:3", adapter_name="qq", session_type="thread"),
+            types.SimpleNamespace(sid="tg:dm:4", adapter_name="telegram", session_type="dm"),
+        ]
+        session_mgr = self.make_session_mgr(sessions)
+        self.ctx.session_mgr = session_mgr
+        self.plugin.plugin_cfg["record_enabled"] = True
+        self.plugin.plugin_cfg["record_template"] = "{bad}"
+        payload = await self.emit_offline()
+        await self.plugin._check(self.adapter, self.state)
+        self.assertEqual([c.args[0] for c in session_mgr.update_memory.await_args_list], ["qq:dm:1", "qq:gm:2"])
+        for call in session_mgr.update_memory.await_args_list:
+            self.assertTrue(call.kwargs["require_existing"])
+        chunk = session_mgr.update_memory.await_args_list[0].args[1]
+        self.assertEqual(chunk[0]["role"], "user")
+        self.assertIn("[系统通知]", chunk[0]["content"])
+        self.assertIn(payload["tag"], chunk[0]["content"])
+        self.assertIsNotNone(self.state["recorded"])
+        # the same event fingerprint is recorded once
+        self.state["next_retry"] = 0
+        await self.plugin._check(self.adapter, self.state)
+        self.assertEqual(session_mgr.update_memory.await_count, 2)
+        # guards: disabled record and missing session manager never enumerate
+        guard_mgr = self.make_session_mgr([])
+        self.ctx.session_mgr = guard_mgr
+        self.plugin.plugin_cfg["record_enabled"] = False
+        await self.plugin._record_offline(self.adapter, {"event": "raw-2"}, dict(recorded=None))
+        guard_mgr.get_sessions.assert_not_awaited()
+        bare = module.QQKickedNotifier(types.SimpleNamespace(publish_notice=AsyncMock()), {"record_enabled": True})
+        await bare._record_offline(self.adapter, {"event": "raw-3"}, dict(recorded=None))
+
+    async def test_record_only_mode_skips_send(self):
+        session_mgr = self.make_session_mgr([types.SimpleNamespace(sid="qq:dm:1", adapter_name="qq", session_type="dm")])
+        self.ctx.session_mgr = session_mgr
+        self.plugin.plugin_cfg["notify_enabled"] = False
+        self.plugin.plugin_cfg["record_enabled"] = True
+        await self.emit_offline()
+        await self.plugin._check(self.adapter, self.state)
+        session_mgr.update_memory.assert_awaited_once()
+        self.plugin._send.assert_not_awaited()
+        self.assertIsNone(self.state["pending"])
+
+    async def test_record_independent_of_notify_failure(self):
+        session_mgr = self.make_session_mgr([types.SimpleNamespace(sid="qq:dm:1", adapter_name="qq", session_type="dm")])
+        self.ctx.session_mgr = session_mgr
+        self.plugin.plugin_cfg["record_enabled"] = True
+        self.plugin._send = AsyncMock(side_effect=RuntimeError("failure"))
+        await self.emit_offline()
+        await self.plugin._check(self.adapter, self.state)
+        session_mgr.update_memory.assert_awaited_once()
+        self.assertIsNotNone(self.state["pending"])
+
+    async def test_monitor_starts_for_record_only(self):
+        plugin = module.QQKickedNotifier(self.ctx, {"record_enabled": True})
+        plugin._monitor = AsyncMock()
+        await plugin.initialize()
+        await asyncio.sleep(0)
+        plugin._monitor.assert_awaited_once()
+        await plugin.terminate()
+        disabled = module.QQKickedNotifier(self.ctx, {})
+        await disabled.initialize()
+        self.assertIsNone(disabled._task)
 
 
 if __name__ == "__main__":
