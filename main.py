@@ -14,6 +14,8 @@ DEFAULT_TEMPLATE = (
     "QQ：{qq}\n信号：{signal}\n原因：{tag} {message}\n事件原文：{event}"
 )
 
+DEFAULT_RECORD_TEMPLATE = "[系统通知] {adapter} 适配器账号 {qq} 于 {time} 掉线（{tag}：{message}）"
+
 
 class QQKickedNotifier(BasePlugin):
     def __init__(self, ctx, cfg):
@@ -22,7 +24,7 @@ class QQKickedNotifier(BasePlugin):
         self._states = {}
 
     async def initialize(self):
-        if self.plugin_cfg.get("notify_enabled", False):
+        if self.plugin_cfg.get("notify_enabled", False) or self.plugin_cfg.get("record_enabled", False):
             self._task = asyncio.create_task(self._monitor())
 
     async def terminate(self):
@@ -42,7 +44,7 @@ class QQKickedNotifier(BasePlugin):
 
     def _attach(self, adapter):
         client = adapter.get_client()
-        state = dict(client=client, hooks=[], pending=None, sent_events=set(), next_retry=0)
+        state = dict(client=client, hooks=[], pending=None, sent_events=set(), next_retry=0, recorded=None)
 
         async def receive(data):
             if not isinstance(data, dict):
@@ -91,6 +93,18 @@ class QQKickedNotifier(BasePlugin):
                           adapter=adapter.info.name,
                           qq=str(client.self_id or adapter.config.get("bot_pid", "unknown")),
                           event=raw, signal="bot_offline", tag=tag, message=reason)
+            try:
+                await self._record_offline(adapter, values, state)
+            except Exception as exc:
+                # Do not log exception messages: they can contain configuration secrets.
+                logger.warning(f"[QQKickedNotifier] Record failed ({type(exc).__name__}); retry in 60s")
+            if not self.plugin_cfg.get("notify_enabled", False):
+                # Record-only mode: the event is handled once the record pass completed.
+                if state["recorded"] == raw:
+                    state["sent_events"].add(raw)
+                    if state["pending"] == pending:
+                        state["pending"] = None
+                return
             template = self.plugin_cfg.get("notify_template") or self.plugin_cfg.get("template") or DEFAULT_TEMPLATE
             try:
                 try:
@@ -107,6 +121,50 @@ class QQKickedNotifier(BasePlugin):
                 if state["pending"] == pending:
                     state["pending"] = None
                 logger.info(f"[QQKickedNotifier] Notification delivered for {adapter.info.name}")
+
+    async def _record_offline(self, adapter, values, state):
+        """Write the offline fact into the adapter's own sessions, independent of notify success."""
+        raw = values["event"]
+        if state["recorded"] == raw:
+            return
+        if not self.plugin_cfg.get("record_enabled", False):
+            state["recorded"] = raw
+            return
+        session_mgr = getattr(self.ctx, "session_mgr", None) if self.ctx is not None else None
+        if session_mgr is None:
+            state["recorded"] = raw
+            return
+        template = self.plugin_cfg.get("record_template") or DEFAULT_RECORD_TEMPLATE
+        try:
+            text = template.format_map(values)
+        except (AttributeError, KeyError, ValueError, IndexError, TypeError):
+            logger.warning("[QQKickedNotifier] Invalid record template; using default")
+            text = DEFAULT_RECORD_TEMPLATE.format_map(values)
+        chunk = [{"role": "user", "content": text}]
+        sessions = await session_mgr.get_sessions(include_content=False, kind="im")
+        written = 0
+        for session in sessions:
+            if session.adapter_name != adapter.info.name or session.session_type not in ("dm", "gm"):
+                continue
+            try:
+                ok = await session_mgr.update_memory(session.sid, chunk, require_existing=True)
+            except Exception as exc:
+                logger.warning(f"[QQKickedNotifier] Record failed for {session.sid} ({type(exc).__name__})")
+                continue
+            if ok:
+                written += 1
+        state["recorded"] = raw
+        logger.info(f"[QQKickedNotifier] Offline record written to {written} sessions of {adapter.info.name}")
+
+    def _target_session(self, source_adapter):
+        """Validate the shared cross-adapter target session and return its SID."""
+        target = self.plugin_cfg.get("session", {}).get("target_session_id", "")
+        parts = target.split(":", 2)
+        if len(parts) != 3 or not all(parts) or parts[1] not in ("dm", "gm"):
+            raise ValueError("Invalid target session")
+        if parts[0] == source_adapter:
+            raise ValueError("Notification must use a different adapter")
+        return target
 
     async def _send(self, source_adapter, message):
         method = self.plugin_cfg.get("notify_method", "ntfy")
@@ -131,17 +189,15 @@ class QQKickedNotifier(BasePlugin):
             if not isinstance(result, str) or not result.startswith("✅"):
                 raise RuntimeError("Email delivery failed")
         elif method == "session":
-            target = self.plugin_cfg.get("session", {}).get("target_session_id", "")
-            parts = target.split(":", 2)
-            if len(parts) != 3 or not all(parts) or parts[1] not in ("dm", "gm"):
-                raise ValueError("Invalid target session")
-            if parts[0] == source_adapter:
-                raise ValueError("Notification must use a different adapter")
-            result = await self.ctx.send_message_chain(target, MessageChain().text(message))
+            result = await self.ctx.send_message_chain(self._target_session(source_adapter), MessageChain().text(message))
             if not result.ok:
                 raise RuntimeError("Session delivery failed")
+        elif method == "llm":
+            # Publish as a system notice so the target session's LLM perceives and
+            # words the outage itself; raises when the target adapter is missing.
+            await self.ctx.publish_notice(self._target_session(source_adapter), MessageChain().text(message))
         else:
-            raise ValueError("Only ntfy/email/session are supported; original cannot work offline")
+            raise ValueError("Only ntfy/email/session/llm are supported; original cannot work offline")
 
 
 plugin_class = QQKickedNotifier
